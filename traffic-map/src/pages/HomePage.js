@@ -14,9 +14,7 @@ const HomePage = () => {
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [directions, setDirections] = useState(null);
   const [routeColor, setRouteColor] = useState("gray");
-  const [minSpeed, setMinSpeed] = useState(20);
-  const [maxSpeed, setMaxSpeed] = useState(60);
-  const [numVehicles, setNumVehicles] = useState(300);
+
   const navigate = useNavigate();
 
   const handleSubmit = async () => {
@@ -39,10 +37,7 @@ const HomePage = () => {
           const response = await axios.post("http://localhost:5050/predict", {
             origin,
             destination,
-            datetime: selectedDate.toISOString(),
-            min_speed: minSpeed,
-            max_speed: maxSpeed,
-            num_vehicles: numVehicles
+            datetime: selectedDate.toISOString()
           }, {
             headers: {
               "Content-Type": "application/json"
@@ -96,7 +91,7 @@ const HomePage = () => {
           🚦 Trafik Yoğunluğu Tahmini
         </h2>
         <p style={{ textAlign: "center", color: "#6b7280", marginBottom: 0, fontSize: "1rem" }}>
-          Başlangıç ve varış noktası ile tarih seçin, trafik yoğunluğunu tahmin edin.
+          Başlangıç ve varış noktası ile gelecek tarih/saat seçin. Trafik parametreleri otomatik hesaplanır.
         </p>
 
         <div style={{ position: "relative" }}>
@@ -160,62 +155,7 @@ const HomePage = () => {
           />
         </div>
 
-        <div style={{ position: "relative" }}>
-          <input
-            type="number"
-            style={{
-              width: "90%",
-              padding: "0.8rem 1rem",
-              borderRadius: 8,
-              border: "1px solid #e5e7eb",
-              fontSize: "1rem",
-              background: "#f9fafb",
-              color: "#22223b",
-              outline: "none"
-            }}
-            placeholder="Minimum Hız (km/s)"
-            value={minSpeed}
-            onChange={e => setMinSpeed(Number(e.target.value))}
-          />
-        </div>
 
-        <div style={{ position: "relative" }}>
-          <input
-            type="number"
-            style={{
-              width: "90%",
-              padding: "0.8rem 1rem",
-              borderRadius: 8,
-              border: "1px solid #e5e7eb",
-              fontSize: "1rem",
-              background: "#f9fafb",
-              color: "#22223b",
-              outline: "none"
-            }}
-            placeholder="Maksimum Hız (km/s)"
-            value={maxSpeed}
-            onChange={e => setMaxSpeed(Number(e.target.value))}
-          />
-        </div>
-
-        <div style={{ position: "relative" }}>
-          <input
-            type="number"
-            style={{
-              width: "90%",
-              padding: "0.8rem 1rem",
-              borderRadius: 8,
-              border: "1px solid #e5e7eb",
-              fontSize: "1rem",
-              background: "#f9fafb",
-              color: "#22223b",
-              outline: "none"
-            }}
-            placeholder="Araç Sayısı"
-            value={numVehicles}
-            onChange={e => setNumVehicles(Number(e.target.value))}
-          />
-        </div>
 
         <button
           onClick={handleSubmit}
