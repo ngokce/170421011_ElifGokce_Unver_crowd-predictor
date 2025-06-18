@@ -16,6 +16,10 @@ GOOGLE_API_KEY = "AIzaSyDOQepkRGNzynm4fxu9u9MN-qfPQcvOVu8"
 model = None
 scaler = None
 
+# Geçici olarak memory'de tutacağız (sonra database'e geçecek)
+user_search_history = {}  # {user_id: [search_records]}
+user_favorites = {}       # {user_id: [favorite_records]}
+
 
 def load_model():
     global model, scaler
@@ -190,6 +194,7 @@ def extract_features_from_request(data):
         min_speed, max_speed, num_vehicles,
         lat, lng
     ]
+    
     return features, {
         "hour": hour,
         "day_of_week": day_of_week,
@@ -340,6 +345,161 @@ def predict():
         import traceback
         print(traceback.format_exc())  # Hata detayını terminale yazdırır
         return jsonify({"error": f"Tahmin yapılırken hata oluştu: {str(e)}"}), 500
+
+
+# Favoriler ve Geçmiş Aramalar için endpoint'ler
+
+@app.route("/search-history/<user_id>", methods=["GET"])
+def get_search_history(user_id):
+    """Kullanıcının geçmiş aramalarını getir"""
+    try:
+        history = user_search_history.get(user_id, [])
+        return jsonify({
+            "user_id": user_id,
+            "search_history": history,
+            "count": len(history)
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/search-history", methods=["POST"])
+def add_search_history():
+    """Yeni arama geçmişine ekle"""
+    try:
+        data = request.get_json()
+        required_fields = ["user_id", "origin", "destination", "datetime"]
+        
+        for field in required_fields:
+            if field not in data:
+                return jsonify({"error": f"Eksik alan: {field}"}), 400
+        
+        user_id = data["user_id"]
+        
+        # Arama kaydı oluştur
+        search_record = {
+            "id": len(user_search_history.get(user_id, [])) + 1,
+            "origin": data["origin"],
+            "destination": data["destination"],
+            "datetime": data["datetime"],
+            "search_time": datetime.now().isoformat(),
+            "traffic_result": data.get("traffic_result", None)
+        }
+        
+        # Kullanıcının geçmiş aramalarını al veya yeni liste oluştur
+        if user_id not in user_search_history:
+            user_search_history[user_id] = []
+        
+        # Yeni aramayı başa ekle (en son arama üstte)
+        user_search_history[user_id].insert(0, search_record)
+        
+        # Maksimum 50 arama tut
+        if len(user_search_history[user_id]) > 50:
+            user_search_history[user_id] = user_search_history[user_id][:50]
+            
+        return jsonify({
+            "message": "Arama geçmişe eklendi",
+            "search_record": search_record
+        })
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/favorites/<user_id>", methods=["GET"])
+def get_favorites(user_id):
+    """Kullanıcının favorilerini getir"""
+    try:
+        favorites = user_favorites.get(user_id, [])
+        return jsonify({
+            "user_id": user_id,
+            "favorites": favorites,
+            "count": len(favorites)
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/favorites", methods=["POST"])
+def add_favorite():
+    """Favori ekle"""
+    try:
+        data = request.get_json()
+        required_fields = ["user_id", "search_id"]
+        
+        for field in required_fields:
+            if field not in data:
+                return jsonify({"error": f"Eksik alan: {field}"}), 400
+        
+        user_id = data["user_id"]
+        search_id = data["search_id"]
+        
+        # Arama geçmişinden ilgili kaydı bul
+        user_history = user_search_history.get(user_id, [])
+        search_record = None
+        
+        for record in user_history:
+            if record["id"] == search_id:
+                search_record = record
+                break
+        
+        if not search_record:
+            return jsonify({"error": "Arama kaydı bulunamadı"}), 404
+        
+        # Favori kaydı oluştur
+        favorite_record = {
+            "id": len(user_favorites.get(user_id, [])) + 1,
+            "origin": search_record["origin"],
+            "destination": search_record["destination"],
+            "datetime": search_record["datetime"],
+            "search_time": search_record["search_time"],
+            "traffic_result": search_record["traffic_result"],
+            "favorited_at": datetime.now().isoformat()
+        }
+        
+        # Kullanıcının favorilerini al veya yeni liste oluştur
+        if user_id not in user_favorites:
+            user_favorites[user_id] = []
+        
+        # Zaten favorilerde var mı kontrol et
+        for fav in user_favorites[user_id]:
+            if (fav["origin"] == search_record["origin"] and 
+                fav["destination"] == search_record["destination"]):
+                return jsonify({"error": "Bu rota zaten favorilerde"}), 400
+        
+        # Favori ekle
+        user_favorites[user_id].append(favorite_record)
+        
+        return jsonify({
+            "message": "Favori eklendi",
+            "favorite_record": favorite_record
+        })
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/favorites/<user_id>/<int:favorite_id>", methods=["DELETE"])
+def remove_favorite(user_id, favorite_id):
+    """Favori sil"""
+    try:
+        if user_id not in user_favorites:
+            return jsonify({"error": "Kullanıcının favorisi yok"}), 404
+        
+        # Favoriyi bul ve sil
+        user_favs = user_favorites[user_id]
+        for i, fav in enumerate(user_favs):
+            if fav["id"] == favorite_id:
+                removed_fav = user_favs.pop(i)
+                return jsonify({
+                    "message": "Favori silindi",
+                    "removed_favorite": removed_fav
+                })
+        
+        return jsonify({"error": "Favori bulunamadı"}), 404
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
