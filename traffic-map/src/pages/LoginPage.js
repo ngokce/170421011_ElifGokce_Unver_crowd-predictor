@@ -6,13 +6,21 @@ import Register from "../components/Register";
 import "../App.css";
 import trafficBg from "../assets/traffic-bg.jpg";
 
-function LoginPage() {
+function LoginPage({ onLogin }) {
   const [showLogin, setShowLogin] = useState(true);
   const navigate = useNavigate();
 
-  const handleLogin = () => {
-    localStorage.setItem("token", "dummy");
+  const handleLogin = (userData) => {
+    // Login component'den gelen userData'yı App.js'e ilet
+    if (onLogin) {
+      onLogin(userData);
+    }
     navigate("/home");
+  };
+
+  const handleRegisterSuccess = () => {
+    // Kayıt başarılı olunca login sekmesine geç
+    setShowLogin(true);
   };
 
   return (
@@ -89,7 +97,7 @@ function LoginPage() {
             Kayıt Ol
           </button>
         </div>
-        {showLogin ? <Login onLogin={handleLogin} /> : <Register />}
+        {showLogin ? <Login onLogin={handleLogin} /> : <Register onRegisterSuccess={handleRegisterSuccess} />}
       </div>
     </div>
   );

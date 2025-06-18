@@ -1,10 +1,16 @@
 from flask import Flask, request, jsonify
 import joblib
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask_cors import CORS
 import requests
 import geohash  # pip install python-geohash
+import mysql.connector
+import json
+from mysql.connector import Error
+import bcrypt
+import jwt
+from functools import wraps
 
 app = Flask(__name__)
 CORS(app)
@@ -12,13 +18,127 @@ CORS(app)
 # Google Geocoding API anahtarınızı buraya ekleyin
 GOOGLE_API_KEY = "AIzaSyDOQepkRGNzynm4fxu9u9MN-qfPQcvOVu8"
 
+# JWT secret key (production'da güvenli bir key kullanın)
+JWT_SECRET_KEY = "CrowdPredictor_2024_Secret_Key_MySuperSecretKey12345"
+
+# MySQL bağlantı bilgileri
+MYSQL_CONFIG = {
+    'host': 'localhost',
+    'user': 'root',  # MySQL kullanıcı adınızı girin
+    'password': '12345',  # MySQL şifrenizi buraya yazın
+    'database': 'traffic_predictor'
+}
+
 # Global değişkenler
 model = None
 scaler = None
 
-# Geçici olarak memory'de tutacağız (sonra database'e geçecek)
-user_search_history = {}  # {user_id: [search_records]}
-user_favorites = {}       # {user_id: [favorite_records]}
+# Database bağlantısı
+def get_db_connection():
+    try:
+        connection = mysql.connector.connect(**MYSQL_CONFIG)
+        return connection
+    except Error as e:
+        print(f"❌ Database bağlantı hatası: {e}")
+        return None
+
+# Database tabloları oluştur
+def create_tables():
+    connection = get_db_connection()
+    if connection is None:
+        return False
+    
+    cursor = connection.cursor()
+    
+    try:
+        # Users tablosu
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(100) NOT NULL,
+            email VARCHAR(100) UNIQUE NOT NULL,
+            password_hash VARCHAR(255) NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+        
+        # Search history tablosu
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS search_history (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id INT NOT NULL,
+            origin VARCHAR(255) NOT NULL,
+            destination VARCHAR(255),
+            datetime TIMESTAMP NOT NULL,
+            prediction_result JSON,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            INDEX idx_user_datetime (user_id, created_at)
+        )
+        """)
+        
+        # Favorites tablosu
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS favorites (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id INT NOT NULL,
+            origin VARCHAR(255) NOT NULL,
+            destination VARCHAR(255),
+            route_name VARCHAR(100),
+            prediction_result JSON,
+            search_datetime DATETIME,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            INDEX idx_user_id (user_id)
+        )
+        """)
+        
+        # Mevcut tabloya search_datetime sütununu ekle (eğer yoksa)
+        try:
+            cursor.execute("ALTER TABLE favorites ADD COLUMN search_datetime DATETIME")
+            print("✅ Favorites tablosuna search_datetime sütunu eklendi")
+        except mysql.connector.Error as e:
+            if "Duplicate column name" in str(e):
+                print("✅ search_datetime sütunu zaten mevcut")
+            else:
+                print(f"⚠️ ALTER TABLE hatası: {e}")
+        
+        connection.commit()
+        print("✅ Database tabloları başarıyla oluşturuldu")
+        return True
+        
+    except Error as e:
+        print(f"❌ Tablo oluşturma hatası: {e}")
+        return False
+    finally:
+        cursor.close()
+        connection.close()
+
+# JWT token doğrulama decorator
+def token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = None
+        if 'Authorization' in request.headers:
+            auth_header = request.headers['Authorization']
+            try:
+                token = auth_header.split(" ")[1]
+            except IndexError:
+                return jsonify({'message': 'Token format hatalı'}), 401
+        
+        if not token:
+            return jsonify({'message': 'Token eksik'}), 401
+        
+        try:
+            data = jwt.decode(token, JWT_SECRET_KEY, algorithms=["HS256"])
+            current_user_id = data['user_id']
+        except jwt.ExpiredSignatureError:
+            return jsonify({'message': 'Token süresi dolmuş'}), 401
+        except jwt.InvalidTokenError:
+            return jsonify({'message': 'Geçersiz token'}), 401
+        
+        return f(current_user_id, *args, **kwargs)
+    return decorated
 
 
 def load_model():
@@ -209,6 +329,98 @@ def extract_features_from_request(data):
     }
 
 
+# User Authentication Routes
+@app.route("/register", methods=["POST"])
+def register():
+    try:
+        data = request.get_json()
+        name = data.get('name')
+        email = data.get('email')
+        password = data.get('password')
+        
+        if not all([name, email, password]):
+            return jsonify({'message': 'Tüm alanlar gereklidir'}), 400
+        
+        # Şifreyi hash'le
+        password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+        
+        connection = get_db_connection()
+        if connection is None:
+            return jsonify({'message': 'Database bağlantı hatası'}), 500
+        
+        cursor = connection.cursor()
+        
+        try:
+            cursor.execute(
+                "INSERT INTO users (name, email, password_hash) VALUES (%s, %s, %s)",
+                (name, email, password_hash)
+            )
+            connection.commit()
+            
+            return jsonify({'message': 'Kullanıcı başarıyla kaydedildi'}), 201
+            
+        except mysql.connector.IntegrityError:
+            return jsonify({'message': 'Bu e-posta adresi zaten kullanılıyor'}), 409
+        except Error as e:
+            return jsonify({'message': f'Kayıt hatası: {str(e)}'}), 500
+        finally:
+            cursor.close()
+            connection.close()
+            
+    except Exception as e:
+        return jsonify({'message': f'Sunucu hatası: {str(e)}'}), 500
+
+@app.route("/login", methods=["POST"])
+def login():
+    try:
+        data = request.get_json()
+        email = data.get('email')
+        password = data.get('password')
+        
+        if not all([email, password]):
+            return jsonify({'message': 'E-posta ve şifre gereklidir'}), 400
+        
+        connection = get_db_connection()
+        if connection is None:
+            return jsonify({'message': 'Database bağlantı hatası'}), 500
+        
+        cursor = connection.cursor()
+        
+        try:
+            cursor.execute(
+                "SELECT id, name, password_hash FROM users WHERE email = %s",
+                (email,)
+            )
+            user = cursor.fetchone()
+            
+            if user and bcrypt.checkpw(password.encode('utf-8'), user[2].encode('utf-8')):
+                # JWT token oluştur
+                token = jwt.encode({
+                    'user_id': user[0],
+                    'exp': datetime.utcnow() + timedelta(days=1)
+                }, JWT_SECRET_KEY, algorithm='HS256')
+                
+                return jsonify({
+                    'message': 'Giriş başarılı',
+                    'token': token,
+                    'user': {
+                        'id': user[0],
+                        'name': user[1],
+                        'email': email
+                    }
+                }), 200
+            else:
+                return jsonify({'message': 'Geçersiz e-posta veya şifre'}), 401
+                
+        except Error as e:
+            return jsonify({'message': f'Giriş hatası: {str(e)}'}), 500
+        finally:
+            cursor.close()
+            connection.close()
+            
+    except Exception as e:
+        return jsonify({'message': f'Sunucu hatası: {str(e)}'}), 500
+
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
@@ -347,162 +559,331 @@ def predict():
         return jsonify({"error": f"Tahmin yapılırken hata oluştu: {str(e)}"}), 500
 
 
-# Favoriler ve Geçmiş Aramalar için endpoint'ler
+# Favoriler ve Geçmiş Aramalar için endpoint'ler (Database entegreli)
 
-@app.route("/search-history/<user_id>", methods=["GET"])
-def get_search_history(user_id):
+@app.route("/search-history", methods=["GET"])
+@token_required
+def get_search_history(current_user_id):
     """Kullanıcının geçmiş aramalarını getir"""
     try:
-        history = user_search_history.get(user_id, [])
-        return jsonify({
-            "user_id": user_id,
-            "search_history": history,
-            "count": len(history)
-        })
+        connection = get_db_connection()
+        if connection is None:
+            return jsonify({'error': 'Database bağlantı hatası'}), 500
+        
+        cursor = connection.cursor()
+        
+        try:
+            cursor.execute("""
+                SELECT id, origin, destination, datetime, prediction_result, created_at
+                FROM search_history 
+                WHERE user_id = %s 
+                ORDER BY created_at DESC 
+                LIMIT 50
+            """, (current_user_id,))
+            
+            rows = cursor.fetchall()
+            
+            history = []
+            for row in rows:
+                history.append({
+                    "id": row[0],
+                    "origin": row[1],
+                    "destination": row[2],
+                    "datetime": row[3].isoformat() if row[3] else None,
+                    "prediction_result": row[4],
+                    "created_at": row[5].isoformat() if row[5] else None
+                })
+            
+            return jsonify({
+                "user_id": current_user_id,
+                "search_history": history,
+                "count": len(history)
+            })
+            
+        except Error as e:
+            return jsonify({'error': f'Geçmiş aramalar getirilemedi: {str(e)}'}), 500
+        finally:
+            cursor.close()
+            connection.close()
+            
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 @app.route("/search-history", methods=["POST"])
-def add_search_history():
+@token_required
+def add_search_history(current_user_id):
     """Yeni arama geçmişine ekle"""
     try:
         data = request.get_json()
-        required_fields = ["user_id", "origin", "destination", "datetime"]
+        required_fields = ["origin", "datetime"]
         
         for field in required_fields:
             if field not in data:
                 return jsonify({"error": f"Eksik alan: {field}"}), 400
         
-        user_id = data["user_id"]
+        connection = get_db_connection()
+        if connection is None:
+            return jsonify({'error': 'Database bağlantı hatası'}), 500
         
-        # Arama kaydı oluştur
-        search_record = {
-            "id": len(user_search_history.get(user_id, [])) + 1,
-            "origin": data["origin"],
-            "destination": data["destination"],
-            "datetime": data["datetime"],
-            "search_time": datetime.now().isoformat(),
-            "traffic_result": data.get("traffic_result", None)
-        }
+        cursor = connection.cursor()
         
-        # Kullanıcının geçmiş aramalarını al veya yeni liste oluştur
-        if user_id not in user_search_history:
-            user_search_history[user_id] = []
-        
-        # Yeni aramayı başa ekle (en son arama üstte)
-        user_search_history[user_id].insert(0, search_record)
-        
-        # Maksimum 50 arama tut
-        if len(user_search_history[user_id]) > 50:
-            user_search_history[user_id] = user_search_history[user_id][:50]
+        try:
+            # Datetime'ı MySQL formatına çevir
+            from datetime import datetime
+            iso_datetime = data["datetime"]
+            # UTC'yi yerel saat olarak işle (kullanıcının seçtiği tarih/saat)
+            if iso_datetime.endswith('Z'):
+                iso_datetime = iso_datetime[:-1]  # Z'yi kaldır
+            mysql_datetime = datetime.fromisoformat(iso_datetime).strftime('%Y-%m-%d %H:%M:%S')
             
-        return jsonify({
-            "message": "Arama geçmişe eklendi",
-            "search_record": search_record
-        })
-    
+            # Arama kaydını database'e ekle
+            cursor.execute("""
+                INSERT INTO search_history (user_id, origin, destination, datetime, prediction_result)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (
+                current_user_id,
+                data["origin"],
+                data.get("destination", ""),
+                mysql_datetime,
+                json.dumps(data.get("prediction_result", None))
+            ))
+            
+            connection.commit()
+            search_id = cursor.lastrowid
+            
+            return jsonify({
+                "message": "Arama geçmişe eklendi",
+                "search_id": search_id
+            })
+            
+        except Error as e:
+            return jsonify({'error': f'Arama geçmişe eklenemedi: {str(e)}'}), 500
+        finally:
+            cursor.close()
+            connection.close()
+            
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/favorites/<user_id>", methods=["GET"])
-def get_favorites(user_id):
+@app.route("/favorites", methods=["GET"])
+@token_required
+def get_favorites(current_user_id):
     """Kullanıcının favorilerini getir"""
     try:
-        favorites = user_favorites.get(user_id, [])
-        return jsonify({
-            "user_id": user_id,
-            "favorites": favorites,
-            "count": len(favorites)
-        })
+        connection = get_db_connection()
+        if connection is None:
+            return jsonify({'error': 'Database bağlantı hatası'}), 500
+        
+        cursor = connection.cursor()
+        
+        try:
+            cursor.execute("""
+                SELECT id, origin, destination, route_name, prediction_result, search_datetime, created_at
+                FROM favorites 
+                WHERE user_id = %s 
+                ORDER BY created_at DESC
+            """, (current_user_id,))
+            
+            rows = cursor.fetchall()
+            
+            favorites = []
+            for row in rows:
+                favorites.append({
+                    "id": row[0],
+                    "origin": row[1],
+                    "destination": row[2],
+                    "route_name": row[3],
+                    "prediction_result": row[4],
+                    "search_datetime": row[5].isoformat() if row[5] else None,
+                    "created_at": row[6].isoformat() if row[6] else None
+                })
+            
+            return jsonify({
+                "user_id": current_user_id,
+                "favorites": favorites,
+                "count": len(favorites)
+            })
+            
+        except Error as e:
+            return jsonify({'error': f'Favoriler getirilemedi: {str(e)}'}), 500
+        finally:
+            cursor.close()
+            connection.close()
+            
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 @app.route("/favorites", methods=["POST"])
-def add_favorite():
-    """Favori ekle"""
+@token_required
+def add_favorite(current_user_id):
+    """Favori ekle (geçmiş aramalardan veya direkt)"""
     try:
         data = request.get_json()
-        required_fields = ["user_id", "search_id"]
         
-        for field in required_fields:
-            if field not in data:
-                return jsonify({"error": f"Eksik alan: {field}"}), 400
+        # Geçmiş aramalardan ekleme
+        if "search_id" in data:
+            search_id = data["search_id"]
+            
+            connection = get_db_connection()
+            if connection is None:
+                return jsonify({'error': 'Database bağlantı hatası'}), 500
+            
+            cursor = connection.cursor()
+            
+            try:
+                # Arama geçmişinden kaydı al
+                cursor.execute("""
+                    SELECT origin, destination, datetime, prediction_result
+                    FROM search_history 
+                    WHERE id = %s AND user_id = %s
+                """, (search_id, current_user_id))
+                
+                search_record = cursor.fetchone()
+                
+                if not search_record:
+                    return jsonify({"error": "Arama kaydı bulunamadı"}), 404
+                
+                # Zaten favorilerde var mı kontrol et
+                cursor.execute("""
+                    SELECT id FROM favorites 
+                    WHERE user_id = %s AND origin = %s AND destination = %s
+                """, (current_user_id, search_record[0], search_record[1]))
+                
+                if cursor.fetchone():
+                    return jsonify({"error": "Bu rota zaten favorilerde"}), 400
+                
+                # Favori ekle
+                route_name = data.get("route_name", f"{search_record[0]} - {search_record[1]}")
+                cursor.execute("""
+                    INSERT INTO favorites (user_id, origin, destination, route_name, prediction_result, search_datetime)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (
+                    current_user_id,
+                    search_record[0],
+                    search_record[1],
+                    route_name,
+                    json.dumps(search_record[3]),
+                    search_record[2]  # datetime from search_history
+                ))
+                
+                connection.commit()
+                favorite_id = cursor.lastrowid
+                
+                return jsonify({
+                    "message": "Favori eklendi",
+                    "favorite_id": favorite_id
+                })
+                
+            except Error as e:
+                return jsonify({'error': f'Favori eklenemedi: {str(e)}'}), 500
+            finally:
+                cursor.close()
+                connection.close()
         
-        user_id = data["user_id"]
-        search_id = data["search_id"]
-        
-        # Arama geçmişinden ilgili kaydı bul
-        user_history = user_search_history.get(user_id, [])
-        search_record = None
-        
-        for record in user_history:
-            if record["id"] == search_id:
-                search_record = record
-                break
-        
-        if not search_record:
-            return jsonify({"error": "Arama kaydı bulunamadı"}), 404
-        
-        # Favori kaydı oluştur
-        favorite_record = {
-            "id": len(user_favorites.get(user_id, [])) + 1,
-            "origin": search_record["origin"],
-            "destination": search_record["destination"],
-            "datetime": search_record["datetime"],
-            "search_time": search_record["search_time"],
-            "traffic_result": search_record["traffic_result"],
-            "favorited_at": datetime.now().isoformat()
-        }
-        
-        # Kullanıcının favorilerini al veya yeni liste oluştur
-        if user_id not in user_favorites:
-            user_favorites[user_id] = []
-        
-        # Zaten favorilerde var mı kontrol et
-        for fav in user_favorites[user_id]:
-            if (fav["origin"] == search_record["origin"] and 
-                fav["destination"] == search_record["destination"]):
-                return jsonify({"error": "Bu rota zaten favorilerde"}), 400
-        
-        # Favori ekle
-        user_favorites[user_id].append(favorite_record)
-        
-        return jsonify({
-            "message": "Favori eklendi",
-            "favorite_record": favorite_record
-        })
-    
+        # Direkt favori ekleme
+        else:
+            required_fields = ["origin", "destination"]
+            
+            for field in required_fields:
+                if field not in data:
+                    return jsonify({"error": f"Eksik alan: {field}"}), 400
+            
+            connection = get_db_connection()
+            if connection is None:
+                return jsonify({'error': 'Database bağlantı hatası'}), 500
+            
+            cursor = connection.cursor()
+            
+            try:
+                # Zaten favorilerde var mı kontrol et
+                cursor.execute("""
+                    SELECT id FROM favorites 
+                    WHERE user_id = %s AND origin = %s AND destination = %s
+                """, (current_user_id, data["origin"], data["destination"]))
+                
+                if cursor.fetchone():
+                    return jsonify({"error": "Bu rota zaten favorilerde"}), 400
+                
+                # Favori ekle
+                route_name = data.get("route_name", f"{data['origin']} - {data['destination']}")
+                cursor.execute("""
+                    INSERT INTO favorites (user_id, origin, destination, route_name, prediction_result, search_datetime)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (
+                    current_user_id,
+                    data["origin"],
+                    data["destination"],
+                    route_name,
+                    json.dumps(data.get("prediction_result", None)),
+                    None  # No search datetime for direct add
+                ))
+                
+                connection.commit()
+                favorite_id = cursor.lastrowid
+                
+                return jsonify({
+                    "message": "Favori eklendi",
+                    "favorite_id": favorite_id
+                })
+                
+            except Error as e:
+                return jsonify({'error': f'Favori eklenemedi: {str(e)}'}), 500
+            finally:
+                cursor.close()
+                connection.close()
+                
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/favorites/<user_id>/<int:favorite_id>", methods=["DELETE"])
-def remove_favorite(user_id, favorite_id):
+@app.route("/favorites/<int:favorite_id>", methods=["DELETE"])
+@token_required
+def remove_favorite(current_user_id, favorite_id):
     """Favori sil"""
     try:
-        if user_id not in user_favorites:
-            return jsonify({"error": "Kullanıcının favorisi yok"}), 404
+        connection = get_db_connection()
+        if connection is None:
+            return jsonify({'error': 'Database bağlantı hatası'}), 500
         
-        # Favoriyi bul ve sil
-        user_favs = user_favorites[user_id]
-        for i, fav in enumerate(user_favs):
-            if fav["id"] == favorite_id:
-                removed_fav = user_favs.pop(i)
-                return jsonify({
-                    "message": "Favori silindi",
-                    "removed_favorite": removed_fav
-                })
+        cursor = connection.cursor()
         
-        return jsonify({"error": "Favori bulunamadı"}), 404
-    
+        try:
+            # Favori var mı kontrol et ve sil
+            cursor.execute("""
+                DELETE FROM favorites 
+                WHERE id = %s AND user_id = %s
+            """, (favorite_id, current_user_id))
+            
+            if cursor.rowcount == 0:
+                return jsonify({"error": "Favori bulunamadı"}), 404
+            
+            connection.commit()
+            
+            return jsonify({
+                "message": "Favori silindi",
+                "favorite_id": favorite_id
+            })
+            
+        except Error as e:
+            return jsonify({'error': f'Favori silinemedi: {str(e)}'}), 500
+        finally:
+            cursor.close()
+            connection.close()
+            
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
+    # Database tablolarını oluştur
+    if create_tables():
+        print("✅ Database tabloları hazır")
+    else:
+        print("⚠️ Database tabloları oluşturulamadı, devam ediliyor...")
+    
     if load_model():
         print("🚀 API başlatılıyor...")
         app.run(host="0.0.0.0", port=5050, debug=True)

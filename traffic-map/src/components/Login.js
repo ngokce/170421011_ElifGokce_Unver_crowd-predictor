@@ -4,13 +4,48 @@ import React, { useState } from "react";
 function Login({ onLogin }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    if (email && password) {
-      onLogin();
-    } else {
-      alert("Lütfen e-posta ve şifre girin.");
+    setError("");
+    
+    if (!email || !password) {
+      setError("Lütfen e-posta ve şifre girin.");
+      return;
+    }
+
+    setLoading(true);
+    
+    try {
+      const response = await fetch('http://localhost:5050/login', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ email, password }),
+      });
+
+      const data = await response.json();
+      console.log('Login response:', response.status, data);
+
+      if (response.ok) {
+        // Token'i localStorage'a kaydet
+        localStorage.setItem('token', data.token);
+        localStorage.setItem('user', JSON.stringify(data.user));
+        
+        console.log('Login successful, calling onLogin with:', data.user);
+        // Kullanıcıyı ana sayfaya yönlendir
+        onLogin(data.user);
+      } else {
+        setError(data.message || 'Giriş yapılırken bir hata oluştu');
+      }
+    } catch (error) {
+      setError('Sunucuya bağlanırken bir hata oluştu');
+      console.error('Login error:', error);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -30,6 +65,20 @@ function Login({ onLogin }) {
         marginBottom: "0.5rem",
         textAlign: "center"
       }}>Hoş Geldiniz</h2>
+      
+      {error && (
+        <div style={{
+          backgroundColor: "#fee2e2",
+          color: "#dc2626",
+          padding: "0.75rem",
+          borderRadius: "8px",
+          fontSize: "0.875rem",
+          textAlign: "center",
+          border: "1px solid #fecaca"
+        }}>
+          {error}
+        </div>
+      )}
       
       <div style={{ 
         position: "relative",
@@ -99,30 +148,35 @@ function Login({ onLogin }) {
 
       <button
         type="submit"
+        disabled={loading}
         style={{
-          backgroundColor: "#fff",
-          color: "#22223b",
+          backgroundColor: loading ? "#9ca3af" : "#fff",
+          color: loading ? "#fff" : "#22223b",
           padding: "0.75rem 1.5rem",
           borderRadius: "8px",
           border: "1px solid #22223b",
           fontSize: "1rem",
           fontWeight: "500",
-          cursor: "pointer",
+          cursor: loading ? "not-allowed" : "pointer",
           transition: "all 0.3s ease",
           marginTop: "1rem",
           width: "100%",
           boxSizing: "border-box"
         }}
         onMouseOver={(e) => {
-          e.target.style.backgroundColor = "#22223b";
-          e.target.style.color = "#fff";
+          if (!loading) {
+            e.target.style.backgroundColor = "#22223b";
+            e.target.style.color = "#fff";
+          }
         }}
         onMouseOut={(e) => {
-          e.target.style.backgroundColor = "#fff";
-          e.target.style.color = "#22223b";
+          if (!loading) {
+            e.target.style.backgroundColor = "#fff";
+            e.target.style.color = "#22223b";
+          }
         }}
       >
-        Giriş Yap
+        {loading ? "Giriş Yapılıyor..." : "Giriş Yap"}
       </button>
 
       <div style={{
