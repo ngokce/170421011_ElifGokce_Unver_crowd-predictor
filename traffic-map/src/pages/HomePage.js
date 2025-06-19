@@ -232,7 +232,7 @@ const HomePage = () => {
           background: "#fff"
         }}
       >
-        <LoadScript googleMapsApiKey="AIzaSyDOQepkRGNzynm4fxu9u9MN-qfPQcvOVu8">
+        <LoadScript googleMapsApiKey="google-key">
           <GoogleMap mapContainerStyle={{ height: "100%", width: "100%" }} center={center} zoom={12}>
             {directions && (
               <DirectionsRenderer
