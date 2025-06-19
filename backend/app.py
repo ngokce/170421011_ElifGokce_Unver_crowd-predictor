@@ -16,7 +16,7 @@ app = Flask(__name__)
 CORS(app)
 
 # Google Geocoding API anahtarınızı buraya ekleyin
-GOOGLE_API_KEY = "AIzaSyDOQepkRGNzynm4fxu9u9MN-qfPQcvOVu8"
+GOOGLE_API_KEY = "google-key"
 
 # JWT secret key (production'da güvenli bir key kullanın)
 JWT_SECRET_KEY = "CrowdPredictor_2024_Secret_Key_MySuperSecretKey12345"
