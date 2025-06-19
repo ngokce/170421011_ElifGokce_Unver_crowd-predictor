@@ -25,7 +25,7 @@ const MapView = () => {
 
   return (
     <LoadScript
-      googleMapsApiKey="AIzaSyDOQepkRGNzynm4fxu9u9MN-qfPQcvOVu8"
+      googleMapsApiKey="google-key"
       libraries={['places']}
     >
       
