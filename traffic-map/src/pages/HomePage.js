@@ -14,8 +14,33 @@ const HomePage = () => {
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [directions, setDirections] = useState(null);
   const [routeColor, setRouteColor] = useState("gray");
+  const [estimatedDuration, setEstimatedDuration] = useState(null);
+  const [distance, setDistance] = useState(null);
+  const [trafficLevel, setTrafficLevel] = useState(null);
 
   const navigate = useNavigate();
+
+  // Trafik yoğunluğuna göre süre çarpanları
+  const getTrafficMultiplier = (level) => {
+    switch(level) {
+      case 0: return 1.0;    // Az trafik - normal süre
+      case 1: return 1.3;    // Orta trafik - %30 daha uzun
+      case 2: return 1.7;    // Yoğun trafik - %70 daha uzun
+      default: return 1.0;
+    }
+  };
+
+  // Süreyi dakika olarak formatla
+  const formatDuration = (seconds) => {
+    const minutes = Math.round(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    const remainingMinutes = minutes % 60;
+    
+    if (hours > 0) {
+      return `${hours} saat ${remainingMinutes} dakika`;
+    }
+    return `${minutes} dakika`;
+  };
 
   const handleSubmit = async () => {
     if (!origin || !destination) return alert("Başlangıç ve varış noktası girin!");
@@ -34,6 +59,14 @@ const HomePage = () => {
         if (status === "OK") {
           setDirections(result);
 
+          // Mesafe ve süre bilgisini al
+          const route = result.routes[0];
+          const leg = route.legs[0];
+          const baseDurationSeconds = leg.duration.value;
+          const distanceText = leg.distance.text;
+          
+          setDistance(distanceText);
+
           const response = await axios.post("http://localhost:5050/predict", {
             origin,
             destination,
@@ -46,12 +79,18 @@ const HomePage = () => {
 
           const colorMap = {
             0: "green",
-            1: "yellow",
+            1: "yellow", 
             2: "red"
           };
-          const trafficLevel = response.data.traffic_level;
-          const color = colorMap[trafficLevel] || "gray";
+          const currentTrafficLevel = response.data.traffic_level;
+          const color = colorMap[currentTrafficLevel] || "gray";
           setRouteColor(color);
+          setTrafficLevel(currentTrafficLevel);
+
+          // Trafik yoğunluğuna göre tahmini süreyi ayarla
+          const trafficMultiplier = getTrafficMultiplier(currentTrafficLevel);
+          const adjustedDurationSeconds = baseDurationSeconds * trafficMultiplier;
+          setEstimatedDuration(adjustedDurationSeconds);
 
           // Arama geçmişine kaydet
           try {
@@ -186,8 +225,6 @@ const HomePage = () => {
           />
         </div>
 
-
-
         <button
           onClick={handleSubmit}
           style={{
@@ -205,6 +242,66 @@ const HomePage = () => {
         >
           Haritada Göster
         </button>
+
+        {/* Tahmini Süre ve Mesafe Bilgisi */}
+        {estimatedDuration && distance && (
+          <div style={{
+            background: "linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%)",
+            padding: "1.2rem",
+            borderRadius: 12,
+            border: "1px solid #e5e7eb",
+            marginTop: "0.5rem"
+          }}>
+            <h3 style={{ 
+              color: "#1e293b", 
+              fontSize: "1.1rem", 
+              fontWeight: 600, 
+              marginBottom: "0.8rem",
+              textAlign: "center"
+            }}>
+              📊 Rota Bilgileri
+            </h3>
+            
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ color: "#64748b", fontSize: "0.95rem" }}>📏 Mesafe:</span>
+                <span style={{ color: "#1e293b", fontWeight: 600, fontSize: "1rem" }}>{distance}</span>
+              </div>
+              
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ color: "#64748b", fontSize: "0.95rem" }}>⏱️ Tahmini Süre:</span>
+                <span style={{ 
+                  color: routeColor === "green" ? "#059669" : routeColor === "yellow" ? "#d97706" : "#dc2626", 
+                  fontWeight: 700, 
+                  fontSize: "1.1rem" 
+                }}>
+                  {formatDuration(estimatedDuration)}
+                </span>
+              </div>
+              
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ color: "#64748b", fontSize: "0.95rem" }}>🚦 Trafik Durumu:</span>
+                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                  <span style={{ 
+                    width: 12, 
+                    height: 12, 
+                    borderRadius: 6, 
+                    background: routeColor, 
+                    display: "inline-block",
+                    border: routeColor === "yellow" ? "1px solid #ccc" : "none"
+                  }}></span>
+                  <span style={{ 
+                    color: "#1e293b", 
+                    fontWeight: 600,
+                    fontSize: "0.95rem"
+                  }}>
+                    {trafficLevel === 0 ? "Az Yoğun" : trafficLevel === 1 ? "Orta Yoğun" : "Çok Yoğun"}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         <div style={{ display: "flex", justifyContent: "center", gap: 16, marginTop: 8 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -232,7 +329,7 @@ const HomePage = () => {
           background: "#fff"
         }}
       >
-        <LoadScript googleMapsApiKey="google-key">
+        <LoadScript googleMapsApiKey="AIzaSyDOQepkRGNzynm4fxu9u9MN-qfPQcvOVu8">
           <GoogleMap mapContainerStyle={{ height: "100%", width: "100%" }} center={center} zoom={12}>
             {directions && (
               <DirectionsRenderer
